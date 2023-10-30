@@ -19,6 +19,7 @@ let isRecording = false;
 const client = mqtt.connect(MQTT_BROKER_URL);
 
 app.use(cors({ origin: 'http://localhost' }));
+app.use(cors({ origin: 'http://workhorse.shauncore.com' }));
 
 client.on('connect', () => {
     console.log('Connected to MQTT broker');
