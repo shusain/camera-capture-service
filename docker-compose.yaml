@@ -1,0 +1,12 @@
+version: '3'
+
+services:
+  camera_capture_service:
+    build:
+      context: .
+      target: backend-serve
+    container_name: camera-capture-service
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./captured_images:/usr/src/app/backend/captured_images

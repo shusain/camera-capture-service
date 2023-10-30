@@ -3,6 +3,12 @@ const mqtt = require("mqtt");
 import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
+import express from 'express';
+import cors from 'cors';
+
+
+const app = express();
+const PORT = 3001; // You can change the port number if needed
 
 const MQTT_BROKER_URL = 'mqtt://192.168.0.11';
 const TOPIC = '/irsensor/motion-detected';
@@ -11,6 +17,8 @@ const STOP_TOPIC = '/irsensor/motion-stopped';
 let isRecording = false;
 
 const client = mqtt.connect(MQTT_BROKER_URL);
+
+app.use(cors({ origin: 'http://localhost' }));
 
 client.on('connect', () => {
     console.log('Connected to MQTT broker');
@@ -50,3 +58,45 @@ async function captureImagesFromCamera(ip: string) {
     }
 }
 
+// Endpoint to get a list of all captured images and total file size
+app.get('/images', (req, res) => {
+    const directoryPath = path.join(__dirname, '..', 'captured_images');
+    
+    fs.readdir(directoryPath, (err, files) => {
+        if (err) {
+            return res.status(500).send({ error: "Unable to read directory" });
+        }
+
+        let totalSize = 0;
+        const imageLinks = files.map(file => {
+            const filePath = path.join(directoryPath, file);
+            totalSize += fs.statSync(filePath).size;
+            return {
+                name: file,
+                link: `/image/${file}`
+            };
+        });
+
+        res.send({
+            images: imageLinks,
+            totalSize
+        });
+    });
+});
+
+// Endpoint to get an individual image
+app.get('/image/:filename', (req, res) => {
+    const filename = req.params.filename;
+    const filePath = path.join(__dirname, '..', 'captured_images', filename);
+    
+    fs.exists(filePath, (exists) => {
+        if (!exists) {
+            return res.status(404).send({ error: "Image not found" });
+        }
+        res.sendFile(filePath);
+    });
+});
+
+app.listen(PORT, () => {
+    console.log(`Express server running on http://localhost:${PORT}`);
+});
