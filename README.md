@@ -24,3 +24,7 @@ docker run --rm -e MQTT_BROKER_URL=mqtt://192.168.0.42 -v /mnt/NAS/captures:/dat
 npm ci
 npm run dev
 ```
+
+## Notes
+- Ensure `/mnt/NAS/captures` exists and is writable by kubelet on the node.
+- Broker must be reachable at `192.168.0.42:1883` (or set `MQTT_BROKER_URL`).
