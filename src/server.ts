@@ -17,6 +17,8 @@ const CAPTURE_DIR = process.env.CAPTURE_DIR || path.join('/data', 'captured_imag
 const MODE = (process.env.CAPTURE_MODE || 'capture').toLowerCase(); // 'stream' or 'capture'
 const DURATION_MS = parseInt(process.env.CAPTURE_DURATION_MS || '10000', 10);
 const INTERVAL_MS = parseInt(process.env.CAPTURE_INTERVAL_MS || '100', 10);
+const STREAM_PORT = parseInt(process.env.STREAM_PORT || '80', 10);
+const STREAM_PATH = process.env.STREAM_PATH || '/stream';
 
 let isRecording = false;
 
@@ -73,7 +75,7 @@ async function captureStillSnapshots(ip: string) {
 
 async function captureFromMjpegStream(ip: string) {
     return new Promise<void>((resolve) => {
-        const url = `http://${ip}:81/stream`;
+        const url = `http://${ip}:${STREAM_PORT}${STREAM_PATH}`;
         const req = http.get(url, (res) => {
             const contentType = res.headers['content-type'] || '';
             // Expect multipart/x-mixed-replace; boundary=... 
