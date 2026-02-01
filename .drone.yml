@@ -1,0 +1,58 @@
+kind: pipeline
+type: docker
+name: default
+
+steps:
+- name: build
+  image: node:20-alpine
+  commands:
+  - apk add --no-cache python3 make g++
+  - npm ci
+  - npm run build
+  - tar -czf dist.tar.gz dist package.json package-lock.json
+  when:
+    event:
+    - push
+
+- name: docker
+  image: plugins/docker
+  settings:
+    repo: registry.shaun-husain.com/camera-capture-server
+    tags:
+    - ${DRONE_BUILD_NUMBER}
+    - latest
+    registry: registry.shaun-husain.com
+    dockerfile: Dockerfile
+    insecure: true
+  when:
+    event:
+    - push
+
+- name: kubectl_apply
+  image: bitnami/kubectl:latest
+  environment:
+    KUBECONFIG: /.kube/config
+  volumes:
+  - name: kube
+    path: /.kube
+  commands:
+  - mkdir -p /.kube
+  - cp /hostkube/home/config /.kube/config || cp /hostkube/root/config /.kube/config
+  - chmod 644 /.kube/config
+  - kubectl get ns automation || kubectl create ns automation
+  - kubectl apply -f k8s/
+  - kubectl rollout status deploy/camera-capture-server -n automation --timeout=180s || true
+  - kubectl get deploy,svc -n automation
+  when:
+    event:
+    - push
+
+volumes:
+- name: kube
+  temp: {}
+- name: kubehome
+  host:
+    path: /home/shaun/.kube
+- name: kuberoot
+  host:
+    path: /root/.kube

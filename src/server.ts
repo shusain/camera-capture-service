@@ -10,9 +10,9 @@ import cors from 'cors';
 const app = express();
 const PORT = 3001; // You can change the port number if needed
 
-const MQTT_BROKER_URL = 'mqtt://192.168.0.11';
-const TOPIC = '/irsensor/motion-detected';
-const STOP_TOPIC = '/irsensor/motion-stopped';
+const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://192.168.0.42';
+const TOPIC = process.env.MQTT_TOPIC || '/irsensor/motion-detected';
+const STOP_TOPIC = process.env.MQTT_STOP_TOPIC || '/irsensor/motion-stopped';
 
 let isRecording = false;
 

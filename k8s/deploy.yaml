@@ -1,0 +1,86 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: automation
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: capture-pv-hostpath
+spec:
+  storageClassName: ""
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /mnt/NAS/captures
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: capture-pvc-hostpath
+  namespace: automation
+spec:
+  storageClassName: ""
+  volumeName: capture-pv-hostpath
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  volumeMode: Filesystem
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camera-capture-server
+  namespace: automation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: camera-capture-server
+  template:
+    metadata:
+      labels:
+        app: camera-capture-server
+    spec:
+      containers:
+      - name: server
+        image: registry.shaun-husain.com/camera-capture-server:latest
+        imagePullPolicy: Always
+        env:
+        - name: MQTT_BROKER_URL
+          value: mqtt://192.168.0.42
+        - name: MQTT_TOPIC
+          value: /irsensor/motion-detected
+        - name: MQTT_STOP_TOPIC
+          value: /irsensor/motion-stopped
+        - name: CAPTURE_DIR
+          value: /data/captured_images
+        ports:
+        - containerPort: 3001
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: capture-pvc-hostpath
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: camera-capture-server
+  namespace: automation
+spec:
+  type: ClusterIP
+  selector:
+    app: camera-capture-server
+  ports:
+  - name: http
+    port: 3001
+    targetPort: 3001
