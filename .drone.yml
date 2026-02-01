@@ -33,6 +33,10 @@ steps:
   environment:
     KUBECONFIG: /.kube/config
   volumes:
+  - name: kubehome
+    path: /hostkube/home
+  - name: kuberoot
+    path: /hostkube/root
   - name: kube
     path: /.kube
   commands:
