@@ -5,7 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import express from 'express';
 import cors from 'cors';
-
+import http from 'http';
 
 const app = express();
 const PORT = 3001; // You can change the port number if needed
@@ -13,6 +13,10 @@ const PORT = 3001; // You can change the port number if needed
 const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://192.168.0.42';
 const TOPIC = process.env.MQTT_TOPIC || '/irsensor/motion-detected';
 const STOP_TOPIC = process.env.MQTT_STOP_TOPIC || '/irsensor/motion-stopped';
+const CAPTURE_DIR = process.env.CAPTURE_DIR || path.join('/data', 'captured_images');
+const MODE = (process.env.CAPTURE_MODE || 'capture').toLowerCase(); // 'stream' or 'capture'
+const DURATION_MS = parseInt(process.env.CAPTURE_DURATION_MS || '10000', 10);
+const INTERVAL_MS = parseInt(process.env.CAPTURE_INTERVAL_MS || '100', 10);
 
 let isRecording = false;
 
@@ -20,6 +24,8 @@ const client = mqtt.connect(MQTT_BROKER_URL);
 
 app.use(cors({ origin: ['http://localhost', 'http://workhorse.shauncore.com:8080', 'http://ubuntu-workhorse.local:8080'] }));
 
+// Ensure capture dir exists
+try { fs.mkdirSync(CAPTURE_DIR, { recursive: true }); } catch {}
 
 client.on('connect', () => {
     console.log('Connected to MQTT broker');
@@ -27,36 +33,81 @@ client.on('connect', () => {
     client.subscribe(STOP_TOPIC);
 });
 
-client.on('message', async (topic:string, message:string) => {
+client.on('message', async (topic:string, message:Buffer) => {
     if (topic === TOPIC) {
+        const ipAddress = message.toString().trim();
+        if (!ipAddress) return;
         isRecording = true;
-        const ipAddress = message.toString();
-        console.log(`Motion detected. Capturing images from http://${ipAddress}:81/stream`);
-        await captureImagesFromCamera(ipAddress);
+        console.log(`Motion detected from ${ipAddress}. Mode=${MODE}`);
+        try {
+            if (MODE === 'stream') {
+                await captureFromMjpegStream(ipAddress);
+            } else {
+                await captureStillSnapshots(ipAddress);
+            }
+        } catch (e:any) {
+            console.error('Capture error:', e?.message || e);
+        }
     } else if (topic === STOP_TOPIC) {
         isRecording = false;
         console.log('Motion stopped. Stopping image capture.');
     }
 });
 
-async function captureImagesFromCamera(ip: string) {
+async function captureStillSnapshots(ip: string) {
     const startTime = Date.now();
-    while (isRecording && (Date.now() - startTime) < 10000) {
+    while (isRecording && (Date.now() - startTime) < DURATION_MS) {
         try {
-            console.error(`Getting images from stream`);
-            const response = await axios.get(`http://${ip}:80/capture`, { responseType: 'arraybuffer' });
-            const timestamp = new Date().toISOString();
-            fs.writeFileSync(path.join(__dirname, '..', 'captured_images', `${timestamp}.jpg`), response.data);
-            console.error(`Saved image to file`+path.join(__dirname, '..', 'captured_images', `${timestamp}.jpg`));
+            const response = await axios.get(`http://${ip}:80/capture`, { responseType: 'arraybuffer', timeout: 3000 });
+            const timestamp = new Date().toISOString().replace(/[:.]/g,'-');
+            const file = path.join(CAPTURE_DIR, `${ip.replace(/\./g,'_')}_${timestamp}.jpg`);
+            fs.writeFileSync(file, response.data);
+            console.log(`Saved still: ${file}`);
         } catch (error:any) {
-            console.error(`Error fetching image: ${error.message}`);
+            console.error(`Still fetch error: ${error.message}`);
         }
-        // Over 60s timeout capture
-        if((Date.now() - startTime) > 60000) {
-            return;
-        }
-        await new Promise(res => setTimeout(res, 100)); // Delay for 500ms before capturing the next image.
+        if ((Date.now() - startTime) > 60000) return; // safety cap
+        await new Promise(res => setTimeout(res, INTERVAL_MS));
     }
+}
+
+async function captureFromMjpegStream(ip: string) {
+    return new Promise<void>((resolve) => {
+        const url = `http://${ip}:81/stream`;
+        const req = http.get(url, (res) => {
+            const contentType = res.headers['content-type'] || '';
+            // Expect multipart/x-mixed-replace; boundary=... 
+            const m = /boundary=(.*)$/i.exec(contentType.toString());
+            const boundary = m ? `--${m[1]}` : '--boundary';
+            let buffer = Buffer.alloc(0);
+            const startTime = Date.now();
+            res.on('data', (chunk) => {
+                if (!isRecording || (Date.now() - startTime) > DURATION_MS) {
+                    req.destroy();
+                    resolve();
+                    return;
+                }
+                buffer = Buffer.concat([buffer, chunk]);
+                let idx;
+                while ((idx = buffer.indexOf(boundary)) !== -1) {
+                    const part = buffer.slice(0, idx);
+                    buffer = buffer.slice(idx + boundary.length);
+                    const headerEnd = part.indexOf('\r\n\r\n');
+                    if (headerEnd !== -1) {
+                        const body = part.slice(headerEnd + 4);
+                        if (body.length > 1000) {
+                            const timestamp = new Date().toISOString().replace(/[:.]/g,'-');
+                            const file = path.join(CAPTURE_DIR, `${ip.replace(/\./g,'_')}_${timestamp}.jpg`);
+                            try { fs.writeFileSync(file, body); console.log(`Saved frame: ${file}`);} catch {}
+                        }
+                    }
+                }
+            });
+            res.on('end', () => resolve());
+            res.on('error', () => resolve());
+        });
+        req.on('error', () => resolve());
+    });
 }
 
 // Endpoint to get a list of all captured images and total file size
