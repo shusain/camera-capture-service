@@ -19,6 +19,7 @@ const DURATION_MS = parseInt(process.env.CAPTURE_DURATION_MS || '10000', 10);
 const INTERVAL_MS = parseInt(process.env.CAPTURE_INTERVAL_MS || '100', 10);
 const STREAM_PORT = parseInt(process.env.STREAM_PORT || '80', 10);
 const STREAM_PATH = process.env.STREAM_PATH || '/stream';
+const STREAM_CANDIDATES = (process.env.STREAM_CANDIDATES || '/stream,/mjpeg,/video,/mjpeg/1').split(',');
 
 let isRecording = false;
 
@@ -75,40 +76,50 @@ async function captureStillSnapshots(ip: string) {
 
 async function captureFromMjpegStream(ip: string) {
     return new Promise<void>((resolve) => {
-        const url = `http://${ip}:${STREAM_PORT}${STREAM_PATH}`;
-        const req = http.get(url, (res) => {
-            const contentType = res.headers['content-type'] || '';
-            // Expect multipart/x-mixed-replace; boundary=... 
-            const m = /boundary=(.*)$/i.exec(contentType.toString());
-            const boundary = m ? `--${m[1]}` : '--boundary';
-            let buffer = Buffer.alloc(0);
-            const startTime = Date.now();
-            res.on('data', (chunk) => {
-                if (!isRecording || (Date.now() - startTime) > DURATION_MS) {
+        const startTime = Date.now();
+        const tryNext = (idx: number) => {
+            if (!isRecording || (Date.now() - startTime) > DURATION_MS) { resolve(); return; }
+            const pathCandidate = STREAM_CANDIDATES[idx] || STREAM_PATH;
+            const url = `http://${ip}:${STREAM_PORT}${pathCandidate}`;
+            const req = http.get(url, (res) => {
+                if ((res.statusCode || 0) >= 400) {
                     req.destroy();
-                    resolve();
-                    return;
+                    if (idx + 1 < STREAM_CANDIDATES.length) return tryNext(idx + 1);
+                    return resolve();
                 }
-                buffer = Buffer.concat([buffer, chunk]);
-                let idx;
-                while ((idx = buffer.indexOf(boundary)) !== -1) {
-                    const part = buffer.slice(0, idx);
-                    buffer = buffer.slice(idx + boundary.length);
-                    const headerEnd = part.indexOf('\r\n\r\n');
-                    if (headerEnd !== -1) {
-                        const body = part.slice(headerEnd + 4);
-                        if (body.length > 1000) {
-                            const timestamp = new Date().toISOString().replace(/[:.]/g,'-');
-                            const file = path.join(CAPTURE_DIR, `${ip.replace(/\./g,'_')}_${timestamp}.jpg`);
-                            try { fs.writeFileSync(file, body); console.log(`Saved frame: ${file}`);} catch {}
+                const contentType = res.headers['content-type'] || '';
+                const m = /boundary=(.*)$/i.exec(contentType.toString());
+                const boundary = m ? `--${m[1]}` : '--boundary';
+                let buffer = Buffer.alloc(0);
+                res.on('data', (chunk) => {
+                    if (!isRecording || (Date.now() - startTime) > DURATION_MS) {
+                        req.destroy(); resolve(); return;
+                    }
+                    buffer = Buffer.concat([buffer, chunk]);
+                    let idxB;
+                    while ((idxB = buffer.indexOf(boundary)) !== -1) {
+                        const part = buffer.slice(0, idxB);
+                        buffer = buffer.slice(idxB + boundary.length);
+                        const headerEnd = part.indexOf('\r\n\r\n');
+                        if (headerEnd !== -1) {
+                            const body = part.slice(headerEnd + 4);
+                            if (body.length > 1000) {
+                                const timestamp = new Date().toISOString().replace(/[:.]/g,'-');
+                                const file = path.join(CAPTURE_DIR, `${ip.replace(/\./g,'_')}_${timestamp}.jpg`);
+                                try { fs.writeFileSync(file, body); console.log(`Saved frame: ${file}`);} catch {}
+                            }
                         }
                     }
-                }
+                });
+                res.on('end', () => resolve());
+                res.on('error', () => resolve());
             });
-            res.on('end', () => resolve());
-            res.on('error', () => resolve());
-        });
-        req.on('error', () => resolve());
+            req.on('error', () => {
+                if (idx + 1 < STREAM_CANDIDATES.length) return tryNext(idx + 1);
+                resolve();
+            });
+        };
+        tryNext(0);
     });
 }
 
