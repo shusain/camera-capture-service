@@ -14,12 +14,9 @@ const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://192.168.0.42';
 const TOPIC = process.env.MQTT_TOPIC || '/irsensor/motion-detected';
 const STOP_TOPIC = process.env.MQTT_STOP_TOPIC || '/irsensor/motion-stopped';
 const CAPTURE_DIR = process.env.CAPTURE_DIR || path.join('/data', 'captured_images');
-const MODE = (process.env.CAPTURE_MODE || 'capture').toLowerCase(); // 'stream' or 'capture'
 const DURATION_MS = parseInt(process.env.CAPTURE_DURATION_MS || '10000', 10);
-const INTERVAL_MS = parseInt(process.env.CAPTURE_INTERVAL_MS || '100', 10);
 const STREAM_PORT = parseInt(process.env.STREAM_PORT || '80', 10);
 const STREAM_PATH = process.env.STREAM_PATH || '/stream';
-const STREAM_CANDIDATES = (process.env.STREAM_CANDIDATES || '/stream,/mjpeg,/video,/mjpeg/1').split(',');
 
 let isRecording = false;
 
@@ -41,13 +38,9 @@ client.on('message', async (topic:string, message:Buffer) => {
         const ipAddress = message.toString().trim();
         if (!ipAddress) return;
         isRecording = true;
-        console.log(`Motion detected from ${ipAddress}. Mode=${MODE}`);
+        console.log(`Motion detected from ${ipAddress}. Streaming from http://${ipAddress}:${STREAM_PORT}${STREAM_PATH}`);
         try {
-            if (MODE === 'stream') {
-                await captureFromMjpegStream(ipAddress);
-            } else {
-                await captureStillSnapshots(ipAddress);
-            }
+            await captureFromMjpegStream(ipAddress);
         } catch (e:any) {
             console.error('Capture error:', e?.message || e);
         }
@@ -57,69 +50,42 @@ client.on('message', async (topic:string, message:Buffer) => {
     }
 });
 
-async function captureStillSnapshots(ip: string) {
-    const startTime = Date.now();
-    while (isRecording && (Date.now() - startTime) < DURATION_MS) {
-        try {
-            const response = await axios.get(`http://${ip}:80/capture`, { responseType: 'arraybuffer', timeout: 3000 });
-            const timestamp = new Date().toISOString().replace(/[:.]/g,'-');
-            const file = path.join(CAPTURE_DIR, `${ip.replace(/\./g,'_')}_${timestamp}.jpg`);
-            fs.writeFileSync(file, response.data);
-            console.log(`Saved still: ${file}`);
-        } catch (error:any) {
-            console.error(`Still fetch error: ${error.message}`);
-        }
-        if ((Date.now() - startTime) > 60000) return; // safety cap
-        await new Promise(res => setTimeout(res, INTERVAL_MS));
-    }
-}
-
 async function captureFromMjpegStream(ip: string) {
     return new Promise<void>((resolve) => {
         const startTime = Date.now();
-        const tryNext = (idx: number) => {
-            if (!isRecording || (Date.now() - startTime) > DURATION_MS) { resolve(); return; }
-            const pathCandidate = STREAM_CANDIDATES[idx] || STREAM_PATH;
-            const url = `http://${ip}:${STREAM_PORT}${pathCandidate}`;
-            const req = http.get(url, (res) => {
-                if ((res.statusCode || 0) >= 400) {
-                    req.destroy();
-                    if (idx + 1 < STREAM_CANDIDATES.length) return tryNext(idx + 1);
-                    return resolve();
-                }
-                const contentType = res.headers['content-type'] || '';
-                const m = /boundary=(.*)$/i.exec(contentType.toString());
-                const boundary = m ? `--${m[1]}` : '--boundary';
-                let buffer = Buffer.alloc(0);
-                res.on('data', (chunk) => {
-                    if (!isRecording || (Date.now() - startTime) > DURATION_MS) {
-                        req.destroy(); resolve(); return;
-                    }
-                    buffer = Buffer.concat([buffer, chunk]);
-                    let idxB;
-                    while ((idxB = buffer.indexOf(boundary)) !== -1) {
-                        const part = buffer.slice(0, idxB);
-                        buffer = buffer.slice(idxB + boundary.length);
-                        const headerEnd = part.indexOf('\r\n\r\n');
-                        if (headerEnd !== -1) {
-                            const body = part.slice(headerEnd + 4);
-                            if (body.length > 1000) {
-                                const timestamp = new Date().toISOString().replace(/[:.]/g,'-');
-                                const file = path.join(CAPTURE_DIR, `${ip.replace(/\./g,'_')}_${timestamp}.jpg`);
-                                try { fs.writeFileSync(file, body); console.log(`Saved frame: ${file}`);} catch {}
-                            }
+        const url = `http://${ip}:${STREAM_PORT}${STREAM_PATH}`;
+        const req = http.get(url, (res) => {
+            if ((res.statusCode || 0) >= 400) {
+                console.error(`Stream fetch error: ${res.statusCode} ${STREAM_PATH}`);
+                req.destroy();
+                return resolve();
+            }
+            const contentType = (res.headers['content-type'] || '').toString();
+            const m = /boundary=(.*)$/i.exec(contentType);
+            const boundary = m ? `--${m[1]}` : '--frame';
+            let buffer = Buffer.alloc(0);
+            res.on('data', (chunk) => {
+                if (!isRecording || (Date.now() - startTime) > DURATION_MS) { req.destroy(); resolve(); return; }
+                buffer = Buffer.concat([buffer, chunk]);
+                let idxB;
+                while ((idxB = buffer.indexOf(boundary)) !== -1) {
+                    const part = buffer.slice(0, idxB);
+                    buffer = buffer.slice(idxB + boundary.length);
+                    const headerEnd = part.indexOf('\r\n\r\n');
+                    if (headerEnd !== -1) {
+                        const body = part.slice(headerEnd + 4);
+                        if (body.length > 1000) {
+                            const timestamp = new Date().toISOString().replace(/[:.]/g,'-');
+                            const file = path.join(CAPTURE_DIR, `${ip.replace(/\./g,'_')}_${timestamp}.jpg`);
+                            try { fs.writeFileSync(file, body); console.log(`Saved frame: ${file}`);} catch {}
                         }
                     }
-                });
-                res.on('end', () => resolve());
-                res.on('error', () => resolve());
+                }
             });
-            req.on('error', () => {
-                if (idx + 1 < STREAM_CANDIDATES.length) return tryNext(idx + 1);
-                resolve();
-            });
-        };
-        tryNext(0);
+            res.on('end', () => resolve());
+            res.on('error', () => resolve());
+        });
+        req.on('error', (e) => { console.error(`Stream connect error: ${e.message}`); resolve(); });
     });
 }
 
