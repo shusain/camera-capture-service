@@ -13,6 +13,8 @@ const PORT = 3001; // You can change the port number if needed
 const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://192.168.0.42';
 const TOPIC = process.env.MQTT_TOPIC || '/irsensor/motion-detected';
 const STOP_TOPIC = process.env.MQTT_STOP_TOPIC || '/irsensor/motion-stopped';
+// Also listen to device-scoped PIR topic (e.g., espXXXX/sensor/pir)
+const PIR_TOPIC = process.env.PIR_TOPIC || '+/sensor/pir';
 const CAPTURE_DIR = process.env.CAPTURE_DIR || path.join('/data', 'captured_images');
 const DURATION_MS = parseInt(process.env.CAPTURE_DURATION_MS || '10000', 10);
 const STREAM_PORT = parseInt(process.env.STREAM_PORT || '80', 10);
@@ -32,6 +34,7 @@ client.on('connect', () => {
     console.log('Connected to MQTT broker');
     client.subscribe(TOPIC);
     client.subscribe(STOP_TOPIC);
+    client.subscribe(PIR_TOPIC); // wildcard for device PIR events
 });
 
 function extractIpFromPayload(raw: Buffer): string | null {
@@ -57,19 +60,40 @@ function extractIpFromPayload(raw: Buffer): string | null {
 }
 
 client.on('message', async (topic:string, message:Buffer) => {
-    if (topic === TOPIC) {
-        const ipAddress = extractIpFromPayload(message);
-        if (!ipAddress) { console.warn('Motion payload did not contain a resolvable IP'); return; }
-        isRecording = true;
-        console.log(`Motion detected from ${ipAddress}. Streaming from http://${ipAddress}:${STREAM_PORT}${STREAM_PATH}`);
-        try {
+    try {
+        if (topic === TOPIC) {
+            const ipAddress = extractIpFromPayload(message);
+            if (!ipAddress) { console.warn('Motion payload did not contain a resolvable IP'); return; }
+            isRecording = true;
+            console.log(`Motion detected from ${ipAddress}. Streaming from http://${ipAddress}:${STREAM_PORT}${STREAM_PATH}`);
             await captureFromMjpegStream(ipAddress);
-        } catch (e:any) {
-            console.error('Capture error:', e?.message || e);
+            return;
         }
-    } else if (topic === STOP_TOPIC) {
-        isRecording = false;
-        console.log('Motion stopped. Stopping image capture.');
+        if (topic === STOP_TOPIC) {
+            isRecording = false;
+            console.log('Motion stopped. Stopping image capture.');
+            return;
+        }
+        // Handle device-scoped PIR topic e.g. espXXXX/sensor/pir with JSON {pir, ip, stream_url}
+        if (topic.endsWith('/sensor/pir')) {
+            const text = message.toString().trim();
+            let obj: any = null;
+            try { obj = JSON.parse(text); } catch {}
+            if (!obj || typeof obj.pir !== 'boolean') return;
+            if (obj.pir) {
+                const ipAddress = extractIpFromPayload(message);
+                if (!ipAddress) { console.warn('PIR JSON missing resolvable IP'); return; }
+                isRecording = true;
+                console.log(`PIR start from ${ipAddress}. Streaming from http://${ipAddress}:${STREAM_PORT}${STREAM_PATH}`);
+                await captureFromMjpegStream(ipAddress);
+            } else {
+                isRecording = false;
+                console.log('PIR stop received. Stopping image capture.');
+            }
+            return;
+        }
+    } catch (e:any) {
+        console.error('MQTT message handler error:', e?.message || e);
     }
 });
 
