@@ -22,6 +22,7 @@ let isRecording = false;
 
 const client = mqtt.connect(MQTT_BROKER_URL);
 
+app.use(express.json());
 app.use(cors({ origin: ['http://localhost', 'http://workhorse.shauncore.com:8080', 'http://ubuntu-workhorse.local:8080'] }));
 
 // Ensure capture dir exists
@@ -33,10 +34,32 @@ client.on('connect', () => {
     client.subscribe(STOP_TOPIC);
 });
 
+function extractIpFromPayload(raw: Buffer): string | null {
+    const text = raw.toString().trim();
+    if (!text) return null;
+    // Accept plain IP, JSON with ip or stream_url, or legacy "camera:NAME" (ignored)
+    try {
+        const obj = JSON.parse(text);
+        if (typeof obj === 'object' && obj) {
+            if (typeof obj.ip === 'string') return obj.ip;
+            if (typeof obj.stream_url === 'string') {
+                try { const u = new URL(obj.stream_url); return u.hostname; } catch {}
+            }
+            if (typeof obj.url === 'string') {
+                try { const u = new URL(obj.url); return u.hostname; } catch {}
+            }
+        }
+    } catch {}
+    // Plain IPv4
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(text)) return text;
+    // camera:cam1 or event:start → not usable to derive IP
+    return null;
+}
+
 client.on('message', async (topic:string, message:Buffer) => {
     if (topic === TOPIC) {
-        const ipAddress = message.toString().trim();
-        if (!ipAddress) return;
+        const ipAddress = extractIpFromPayload(message);
+        if (!ipAddress) { console.warn('Motion payload did not contain a resolvable IP'); return; }
         isRecording = true;
         console.log(`Motion detected from ${ipAddress}. Streaming from http://${ipAddress}:${STREAM_PORT}${STREAM_PATH}`);
         try {
