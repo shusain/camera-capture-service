@@ -21,6 +21,12 @@ const STREAM_PORT = parseInt(process.env.STREAM_PORT || '80', 10);
 const STREAM_PATH = process.env.STREAM_PATH || '/stream';
 
 let isRecording = false;
+let sessionStartMs = 0;
+let lastPirFalseMs = 0;
+let stopTimer: NodeJS.Timeout | null = null;
+let activeIp: string | null = null;
+let capturing = false; // prevent overlapping captures
+const MAX_SESSION_MS = 60_000; // cap at 1 minute total
 
 const client = mqtt.connect(MQTT_BROKER_URL);
 
@@ -59,19 +65,41 @@ function extractIpFromPayload(raw: Buffer): string | null {
     return null;
 }
 
+function scheduleStopTimer() {
+    if (stopTimer) clearTimeout(stopTimer);
+    stopTimer = setTimeout(() => {
+        const now = Date.now();
+        const postFalseElapsed = lastPirFalseMs ? (now - lastPirFalseMs) : 0;
+        const sessionElapsed = sessionStartMs ? (now - sessionStartMs) : 0;
+        if ((postFalseElapsed >= 10_000 || !isRecording) || sessionElapsed >= MAX_SESSION_MS) {
+            isRecording = false;
+            activeIp = null;
+        } else {
+            // Not ready to stop yet; reschedule a short check
+            scheduleStopTimer();
+        }
+    }, 1000);
+}
+
 client.on('message', async (topic:string, message:Buffer) => {
     try {
         if (topic === TOPIC) {
             const ipAddress = extractIpFromPayload(message);
             if (!ipAddress) { console.warn('Motion payload did not contain a resolvable IP'); return; }
+            // Start (or extend) session
+            activeIp = ipAddress;
+            const now = Date.now();
+            if (!isRecording) { sessionStartMs = now; }
             isRecording = true;
+            scheduleStopTimer();
             console.log(`Motion detected from ${ipAddress}. Streaming from http://${ipAddress}:${STREAM_PORT}${STREAM_PATH}`);
-            await captureFromMjpegStream(ipAddress);
+            if (!capturing) { capturing = true; await captureFromMjpegStream(ipAddress); capturing = false; }
             return;
         }
         if (topic === STOP_TOPIC) {
-            isRecording = false;
-            console.log('Motion stopped. Stopping image capture.');
+            lastPirFalseMs = Date.now();
+            scheduleStopTimer();
+            console.log('Motion stopped (legacy topic). Will stop after grace period.');
             return;
         }
         // Handle device-scoped PIR topic e.g. espXXXX/sensor/pir with JSON {pir, ip, stream_url}
@@ -83,12 +111,17 @@ client.on('message', async (topic:string, message:Buffer) => {
             if (obj.pir) {
                 const ipAddress = extractIpFromPayload(message);
                 if (!ipAddress) { console.warn('PIR JSON missing resolvable IP'); return; }
+                activeIp = ipAddress;
+                const now = Date.now();
+                if (!isRecording) { sessionStartMs = now; }
                 isRecording = true;
+                scheduleStopTimer();
                 console.log(`PIR start from ${ipAddress}. Streaming from http://${ipAddress}:${STREAM_PORT}${STREAM_PATH}`);
-                await captureFromMjpegStream(ipAddress);
+                if (!capturing) { capturing = true; await captureFromMjpegStream(ipAddress); capturing = false; }
             } else {
-                isRecording = false;
-                console.log('PIR stop received. Stopping image capture.');
+                lastPirFalseMs = Date.now();
+                scheduleStopTimer();
+                console.log('PIR stop received. Will stop after grace period.');
             }
             return;
         }
@@ -112,7 +145,11 @@ async function captureFromMjpegStream(ip: string) {
             const boundary = m ? `--${m[1]}` : '--frame';
             let buffer = Buffer.alloc(0);
             res.on('data', (chunk) => {
-                if (!isRecording || (Date.now() - startTime) > DURATION_MS) { req.destroy(); resolve(); return; }
+                const now = Date.now();
+                const sessionElapsed = now - sessionStartMs;
+                const postFalseElapsed = lastPirFalseMs ? (now - lastPirFalseMs) : 0;
+                const shouldStop = (!isRecording && postFalseElapsed > 10_000) || (sessionElapsed > MAX_SESSION_MS);
+                if (shouldStop) { req.destroy(); resolve(); return; }
                 buffer = Buffer.concat([buffer, chunk]);
                 let idxB;
                 while ((idxB = buffer.indexOf(boundary)) !== -1) {
